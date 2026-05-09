@@ -1,6 +1,7 @@
 #taken and modified from https://github.com/rasbt/LLMs-from-scratch/blob/main/ch05/01_main-chapter-code/gpt_train.py
 
-#torchrun --nproc_per_node=1 trypticon/scripts/data_parallel.py 
+#torchrun --nproc_per_node=2 trypticon/scripts/data_parallel.py 
+#torchrun --nproc_per_node=2 trypticon/scripts/data_parallel.py --wandb
 
 import torch
 import torch.distributed as dist
@@ -24,7 +25,7 @@ def all_reduce(tensor):
     return tensor
 
 
-def all_reduce_gradients(model, world_size):
+def all_reduce_gradients(model, world_size, debug=False):
     for param in model.parameters():
         if param.grad is not None:
             all_reduce(param.grad)
@@ -58,7 +59,7 @@ def evaluate_model(model, train_loader, val_loader, device):
     model.train()
     return train_loss, val_loss
 
-def train(model, train_loader, val_loader, optimizer, num_epochs, eval_freq, device, rank, world_size):
+def train(model, train_loader, val_loader, optimizer, num_epochs, eval_freq, device, rank, world_size, debug=False, wandb=False):
 
     train_losses, val_losses = [], []
     global_step = 0
@@ -70,9 +71,11 @@ def train(model, train_loader, val_loader, optimizer, num_epochs, eval_freq, dev
             optimizer.zero_grad()
 
             loss = calc_loss_batch(input_batch, target_batch, model, device)
+            if debug:
+                print(f"[Rank {rank}] loss: {loss.item():.10f}")
             loss.backward()
 
-            all_reduce_gradients(model, world_size)
+            all_reduce_gradients(model, world_size, debug=debug)
 
             optimizer.step()
 
@@ -84,7 +87,8 @@ def train(model, train_loader, val_loader, optimizer, num_epochs, eval_freq, dev
 
                 if rank == 0:
                     print(f"epoch: {epoch} global step: {global_step} train loss: {train_loss} val loss: {val_loss}")
-                    wandb.log({"epoch": epoch, "global_step": global_step, "train_loss": train_loss, "val_loss": val_loss})
+                    if wandb:
+                        wandb.log({"epoch": epoch, "global_step": global_step, "train_loss": train_loss, "val_loss": val_loss})
     
     return train_losses, val_losses
 
@@ -96,7 +100,9 @@ def main(gpt_config, settings, wandb_run):
     device = torch.device(f"cuda:{rank}")
     print(f"Rank {rank}/{world_size} using device {device}")
 
-    if rank == 0:
+    use_wandb = settings.get("wandb", False)
+
+    if rank == 0 and use_wandb:
         wandb.init(
             entity="jinooo",
             project="trypticon",
@@ -137,15 +143,26 @@ def main(gpt_config, settings, wandb_run):
     model = GPTModel(gpt_config).to(device)
 
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=settings["learning_rate"], weight_decay=settings["weight_decay"]
+        model.parameters(), 
+        lr=settings["learning_rate"], 
+        weight_decay=settings["weight_decay"]
     )
 
     train_losses, val_losses = train(
-        model, train_loader, val_loader, optimizer,
-        num_epochs=settings["num_epochs"], eval_freq=5, device=device, rank=rank, world_size=world_size
+        model, 
+        train_loader, 
+        val_loader, 
+        optimizer,
+        num_epochs=settings["num_epochs"], 
+        eval_freq=5, 
+        device=device, 
+        rank=rank, 
+        world_size=world_size,
+        debug=settings.get("debug", False),
+        wandb=use_wandb
     )
 
-    if rank == 0:
+    if rank == 0 and use_wandb:
         wandb.finish()
 
     dist.destroy_process_group()
@@ -153,22 +170,52 @@ def main(gpt_config, settings, wandb_run):
     return train_losses, val_losses, model
 
 
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(description="trypticon data parallelism")
+
+    parser.add_argument("--vocab_size", type=int, default=50257)
+    parser.add_argument("--context_length", type=int, default=256)
+    parser.add_argument("--emb_dim", type=int, default=768)
+    parser.add_argument("--n_heads", type=int, default=12)
+    parser.add_argument("--n_layers", type=int, default=12)
+    parser.add_argument("--drop_rate", type=float, default=0.1)
+    parser.add_argument("--qkv_bias", type=bool, default=False)
+
+    parser.add_argument("--learning_rate", type=float, default=5e-4)
+    parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--weight_decay", type=float, default=0.1)
+    parser.add_argument("--eval_freq", type=int, default=5)
+    parser.add_argument("--debug", type=bool, default=False)
+    parser.add_argument("--run_name", type=str, default="ddp_run")
+    parser.add_argument("--wandb", type=bool, default=False)
+
+    args = parser.parse_args()
+
+    gpt_config = {
+        "vocab_size": args.vocab_size,
+        "context_length": args.context_length,
+        "emb_dim": args.emb_dim,
+        "n_heads": args.n_heads,
+        "n_layers": args.n_layers,
+        "drop_rate": args.drop_rate,
+        "qkv_bias": args.qkv_bias
+    }
+
+    settings = {
+        "learning_rate": args.learning_rate,
+        "num_epochs": args.num_epochs,
+        "batch_size": args.batch_size,
+        "weight_decay": args.weight_decay,
+        "eval_freq": args.eval_freq,
+        "debug": args.debug,
+        "wandb": args.wandb
+    }
+
+    return gpt_config, settings, args.run_name
+
+
 if __name__ == "__main__":
-    GPT_CONFIG_124M = {
-        "vocab_size": 50257,   
-        "context_length": 256,  
-        "emb_dim": 768,         
-        "n_heads": 12,        
-        "n_layers": 12,         
-        "drop_rate": 0.1,      
-        "qkv_bias": False      
-    }
-
-    OTHER_SETTINGS = {
-        "learning_rate": 5e-4,
-        "num_epochs": 10,
-        "batch_size": 2,
-        "weight_decay": 0.1
-    }
-
-    train_losses, val_losses, model = main(GPT_CONFIG_124M, OTHER_SETTINGS, "ddp_run")
+    gpt_config, settings, run_name = parse_args()
+    train_losses, val_losses, model = main(gpt_config, settings, run_name)

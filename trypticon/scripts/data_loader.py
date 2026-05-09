@@ -52,8 +52,6 @@ class Partition:
         total_size = len(dataset)
         per_partition_size = total_size // self.world_size
 
-        print(f"data is partitioned across {self.world_size} gpus, ~{per_partition_size} samples each")
-
         for idx in range(self.world_size):
             start_idx = idx * per_partition_size
             end_idx = start_idx + per_partition_size if idx < self.world_size - 1 else total_size
