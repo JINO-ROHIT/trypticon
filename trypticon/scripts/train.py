@@ -2,7 +2,6 @@
 
 import torch
 import torch.nn as nn
-import tiktoken
 from tqdm.auto import tqdm
 import wandb
 
