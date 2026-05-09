@@ -32,3 +32,9 @@ python -m trypticon.scripts.train
 # Launch with torchrun (adjust nproc_per_node to your GPU count)
 torchrun --nproc_per_node=2 -m trypticon.scripts.data_parallel
 ```
+
+### A cool graph
+
+<p align="center">
+  <img src="assets/graph.png" width=1000>
+</p>
