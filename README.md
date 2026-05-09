@@ -1,2 +1,3 @@
 # trypticon
-distributed library for training and serving models
+
+a distributed library for training and serving models
